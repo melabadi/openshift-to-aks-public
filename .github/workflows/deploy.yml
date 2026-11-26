@@ -1,0 +1,68 @@
+name: Deploy claims to OpenShift
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: Successful main-branch Build claims run ID to deploy (or roll back to)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: claims-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      RUN_ID: ${{ inputs.build_run }}
+      REGISTRY: ${{ vars.ACR_NAME }}
+      ROUTE: ${{ vars.CLAIMS_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify build provenance
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ && "$ROUTE" == https://* ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > "$RUNNER_TEMP/run.json"
+          jq -e --arg repo "$GITHUB_REPOSITORY" '.head_repository.full_name == $repo and .path == ".github/workflows/build.yml" and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch") and .conclusion == "success"' "$RUNNER_TEMP/run.json"
+          jq -r '"attempt=\(.run_attempt)\nsha=\(.head_sha)"' "$RUNNER_TEMP/run.json" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-${{ steps.build.outputs.attempt }}
+          path: candidate
+          run-id: ${{ inputs.build_run }}
+          github-token: ${{ github.token }}
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Promote the immutable digest and verify the OpenShift route
+        env:
+          RELEASE: ${{ steps.build.outputs.sha }}-${{ inputs.build_run }}-${{ steps.build.outputs.attempt }}
+        run: |
+          digest=$(jq -er --arg release "$RELEASE" 'select(.release == $release) | .digest' candidate/release.json)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          az acr login -n "$REGISTRY"
+          server=$(az acr show -n "$REGISTRY" --query loginServer -o tsv)
+          docker buildx imagetools create --prefer-index=false -t "$server/claims:release" "$server/claims@$digest"
+          promoted=$(az acr repository show -n "$REGISTRY" --image claims:release --query digest -o tsv)
+          [[ "$promoted" == "$digest" ]]
+          # The cluster watches this tag; no cluster-admin credential leaves Azure.
+          for i in {1..90}; do
+            if curl -fsS --max-time 8 "$ROUTE/version" | jq -e --arg r "$RELEASE" '.release == $r'; then break; fi
+            if [[ $i == 90 ]]; then echo "::error::OpenShift did not serve $RELEASE"; exit 1; fi
+            sleep 20
+          done
+          python3 tests/smoke.py "$ROUTE"
+          echo "Verified $RELEASE ($digest) at $ROUTE" >> "$GITHUB_STEP_SUMMARY"

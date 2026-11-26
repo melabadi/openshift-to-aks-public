@@ -1,0 +1,67 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: claims
+spec:
+  tags:
+    - name: release
+      from:
+        kind: DockerImage
+        name: REGISTRY_HOST/claims:release
+      importPolicy:
+        scheduled: true
+      referencePolicy:
+        type: Source
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims
+  annotations:
+    image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"claims:release"},"fieldPath":"spec.template.spec.containers[?(@.name==\"claims\")].image"}]'
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: claims}
+  template:
+    metadata:
+      labels: {app: claims}
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets: [{name: claims-pull}]
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: claims
+          image: REGISTRY_HOST/claims:release
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 48Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {sizeLimit: 16Mi}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: claims}
+spec:
+  selector: {app: claims}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata: {name: claims}
+spec:
+  to: {kind: Service, name: claims}
+  port: {targetPort: http}
+  tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}

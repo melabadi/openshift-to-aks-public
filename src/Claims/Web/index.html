@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Explore insurance claim estimates with a simple, explainable analysis. Synthetic data only.">
+  <title>ClaimLens | Claim analysis</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to claim analysis</a>
+  <header class="header">
+    <a class="brand" href="/" aria-label="ClaimLens home"><span class="brand-mark" aria-hidden="true">C</span>ClaimLens</a>
+    <span class="environment"><span aria-hidden="true"></span>OpenShift demo</span>
+  </header>
+  <main id="main">
+    <div class="intro">
+      <p class="eyebrow">CLAIM ANALYSIS WORKSPACE</p>
+      <h1>A clearer view of every claim.</h1>
+      <p class="lede">Turn a few claim details into an estimated payout and an explainable review path.</p>
+    </div>
+    <div class="notice"><strong>Demo, not a coverage decision.</strong> Use synthetic figures only. This public service has no sign-in and does not store claim history.</div>
+    <noscript><p class="error">Enable JavaScript to submit claims using this page. The HTTP API remains available at POST /claims/analyze.</p></noscript>
+    <div class="workspace">
+      <section class="panel entry" aria-labelledby="claim-heading">
+        <div class="panel-heading"><div><p class="eyebrow">01 / INPUT</p><h2 id="claim-heading">Claim details</h2></div><span class="unit-tag">USD</span></div>
+        <form id="claim-form" autocomplete="off">
+          <fieldset id="fields" disabled>
+            <legend class="sr-only">Claim details in US dollars</legend>
+            <div class="fields">
+              <div class="field">
+                <label for="loss">Claimed loss</label>
+                <div class="money-input"><span aria-hidden="true">$</span><input id="loss" name="loss" type="number" inputmode="decimal" min="0.01" max="10000000" step="0.01" value="2300.00" required aria-describedby="loss-hint"></div>
+                <small id="loss-hint">Total reported loss, before deductible.</small>
+              </div>
+              <div class="field">
+                <label for="deductible">Deductible</label>
+                <div class="money-input"><span aria-hidden="true">$</span><input id="deductible" name="deductible" type="number" inputmode="decimal" min="0" max="10000000" step="0.01" value="500.00" required aria-describedby="deductible-hint"></div>
+                <small id="deductible-hint">Amount the policyholder bears.</small>
+              </div>
+              <div class="field">
+                <label for="limit">Policy limit</label>
+                <div class="money-input"><span aria-hidden="true">$</span><input id="limit" name="limit" type="number" inputmode="decimal" min="0.01" max="10000000" step="0.01" value="5000.00" required aria-describedby="limit-hint"></div>
+                <small id="limit-hint">Maximum estimated payable amount.</small>
+              </div>
+              <div class="field">
+                <label for="days">Days to report</label>
+                <input id="days" name="days" type="number" inputmode="numeric" min="0" max="3650" step="1" value="7" required aria-describedby="days-hint">
+                <small id="days-hint">Days between loss and reporting.</small>
+              </div>
+            </div>
+            <button class="primary" id="analyze" type="submit">Analyze claim <span aria-hidden="true">&rarr;</span></button>
+            <div class="samples">
+              <p>Or load a synthetic example</p>
+              <div class="sample-buttons">
+                <button type="button" data-sample="standard">Standard claim</button>
+                <button type="button" data-sample="review">Limit + late report</button>
+                <button type="button" data-sample="deductible">Within deductible</button>
+              </div>
+            </div>
+          </fieldset>
+        </form>
+      </section>
+      <section class="panel analysis" aria-labelledby="analysis-heading" aria-busy="false" id="analysis">
+        <div class="panel-heading"><div><p class="eyebrow">02 / OUTPUT</p><h2 id="analysis-heading">Analysis summary</h2></div></div>
+        <p id="status" class="sr-only" role="status" aria-live="polite" aria-atomic="true">Ready to analyze.</p>
+        <p id="error" class="error" role="alert" hidden></p>
+        <div id="empty" class="empty">
+          <span class="empty-mark" aria-hidden="true">=</span>
+          <h3>Every estimate starts with the details.</h3>
+          <p>Enter a claim or load an example, then select <strong>Analyze claim</strong>.</p>
+          <div class="steps"><span>Loss</span><span aria-hidden="true">&rarr;</span><span>Deductible</span><span aria-hidden="true">&rarr;</span><span>Policy limit</span></div>
+        </div>
+        <div id="result" hidden>
+          <div class="estimate"><p>Estimated payable</p><p class="amount" id="payable"></p><span class="estimate-caption">USD / indicative estimate</span></div>
+          <div class="routing"><span>Review path</span><strong id="queue" class="badge"></strong></div>
+          <h3 class="reason-heading">What informed this result</h3>
+          <ul id="reasons" class="reasons"></ul>
+          <p class="result-note">An adjuster must confirm coverage and policy terms. No payment is approved by this analysis.</p>
+        </div>
+      </section>
+    </div>
+    <footer><span>Simple rules. Transparent results.</span><span>.NET Framework 4.7.2 target &middot; Mono on OpenShift</span></footer>
+  </main>
+</body>
+</html>

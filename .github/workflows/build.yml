@@ -1,0 +1,73 @@
+name: Build claims
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  framework:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: dotnet publish src/Claims/Claims.csproj -c Release -o dist
+      - name: Exercise the Windows framework executable
+        shell: pwsh
+        run: |
+          $p = Start-Process .\dist\Claims.exe -PassThru -NoNewWindow
+          try { python tests/smoke.py http://localhost:8080; exit $LASTEXITCODE }
+          finally { if (!$p.HasExited) { Stop-Process -Id $p.Id } }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: framework-binaries
+          path: dist/
+          if-no-files-found: error
+
+  image:
+    needs: framework
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      REGISTRY: ${{ vars.ACR_NAME }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: framework-binaries
+          path: dist
+      - name: Build and exercise the Linux image as an arbitrary UID
+        run: |
+          docker build --build-arg RELEASE="$RELEASE" -t claims:test .
+          docker run -d --name claims --read-only --tmpfs /tmp --user 1000740000:0 -p 127.0.0.1:8080:8080 claims:test
+          trap 'docker logs claims; docker rm -f claims' EXIT
+          python3 tests/smoke.py http://localhost:8080
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.ACR_NAME != ''
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Publish the tested image and record its digest
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.ACR_NAME != ''
+        run: |
+          az acr login -n "$REGISTRY"
+          server=$(az acr show -n "$REGISTRY" --query loginServer -o tsv)
+          docker tag claims:test "$server/claims:$RELEASE"
+          docker push "$server/claims:$RELEASE"
+          ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$server/claims:$RELEASE")
+          digest=${ref##*@}
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          jq -n --arg digest "$digest" --arg release "$RELEASE" '{digest:$digest,release:$release}' > release.json
+          cat release.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.ACR_NAME != ''
+        with:
+          name: release-${{ github.run_attempt }}
+          path: release.json
+          if-no-files-found: error
