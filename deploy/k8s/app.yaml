@@ -1,0 +1,90 @@
+# Workload manifests. Rendered with envsubst; required variables: IMAGE.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims
+  labels: { app.kubernetes.io/name: claims }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: claims }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: claims }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: claims }
+      containers:
+        - name: claims
+          image: ${IMAGE}
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - { name: DOTNET_gcServer, value: "0" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claims
+  labels: { app.kubernetes.io/name: claims }
+spec:
+  selector: { app.kubernetes.io/name: claims }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: claims
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: claims }
+---
+# Only workloads in this namespace (the Gateway's proxy pods) may reach the app.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claims-ingress
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: claims }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - { port: 8080 }

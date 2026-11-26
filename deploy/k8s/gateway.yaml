@@ -1,0 +1,66 @@
+# Edge manifests: public Gateway (AKS app routing Gateway API implementation), Let's Encrypt TLS via cert-manager,
+# HTTP->HTTPS redirect. Rendered with envsubst; required variables: DNS_LABEL, APP_HOST, ACME_SERVER.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: ${ACME_SERVER}
+    privateKeySecretRef: { name: letsencrypt-account-key }
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - { kind: Gateway, name: claims, sectionName: http }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: claims
+  annotations:
+    cert-manager.io/issuer: letsencrypt
+spec:
+  gatewayClassName: approuting-istio
+  infrastructure:
+    annotations:
+      service.beta.kubernetes.io/azure-dns-label-name: ${DNS_LABEL}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes: { namespaces: { from: Same } }
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: ${APP_HOST}
+      allowedRoutes: { namespaces: { from: Same } }
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - { kind: Secret, name: claims-tls }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: claims-redirect
+spec:
+  parentRefs:
+    - { name: claims, sectionName: http }
+  hostnames: [${APP_HOST}]
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect: { scheme: https, statusCode: 301 }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: claims
+spec:
+  parentRefs:
+    - { name: claims, sectionName: https }
+  hostnames: [${APP_HOST}]
+  rules:
+    - backendRefs:
+        - { name: claims, port: 8080 }

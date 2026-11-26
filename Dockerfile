@@ -1,12 +1,18 @@
-FROM debian:bookworm-slim
-RUN apt-get update \
- && apt-get install --no-install-recommends -y mono-runtime libmono-system-web-extensions4.0-cil \
- && rm -rf /var/lib/apt/lists/*
+# Build stage: restore and publish with the .NET 11 SDK.
+FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build
+WORKDIR /src
+COPY global.json ./
+COPY src/Claims/Claims.csproj src/Claims/
+RUN dotnet restore src/Claims/Claims.csproj
+COPY src/Claims/ src/Claims/
+RUN dotnet publish src/Claims/Claims.csproj -c Release --no-restore -o /app
+
+# Runtime stage: Ubuntu chiseled ASP.NET Core image (no shell or package manager, non-root by default).
+FROM mcr.microsoft.com/dotnet/aspnet:11.0-resolute-chiseled
 WORKDIR /app
-COPY dist/ /app/
+COPY --from=build /app .
 ARG RELEASE=local
-ENV CLAIMS_RELEASE=$RELEASE
-ENV CLAIMS_PREFIX=http://*:8080/ HOME=/tmp
-USER 10001
+ENV CLAIMS_RELEASE=$RELEASE \
+    ASPNETCORE_HTTP_PORTS=8080
 EXPOSE 8080
-ENTRYPOINT ["mono", "/app/Claims.exe"]
+ENTRYPOINT ["dotnet", "Claims.dll"]

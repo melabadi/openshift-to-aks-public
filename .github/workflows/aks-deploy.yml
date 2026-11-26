@@ -1,0 +1,170 @@
+# Reusable: deploy rendered Kubernetes manifests to AKS (Entra ID + Azure RBAC) with GitHub OIDC,
+# wait for the rollout, then verify the public endpoint.
+name: aks-deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment that holds the federated credential (and any approvals).
+        type: string
+        required: true
+      azure-client-id:
+        type: string
+        required: true
+      azure-tenant-id:
+        type: string
+        required: true
+      azure-subscription-id:
+        type: string
+        required: true
+      resource-group:
+        type: string
+        required: true
+      cluster-name:
+        type: string
+        required: true
+      namespace:
+        type: string
+        required: true
+      manifests:
+        description: Space-separated manifest files, rendered with envsubst before "kubectl apply".
+        type: string
+        required: true
+      manifest-vars:
+        description: Newline-separated NAME=value pairs substituted into the manifests. Only these names are replaced.
+        type: string
+        default: ''
+      rollout:
+        description: Space-separated workloads to wait for, e.g. "deployment/claims".
+        type: string
+        default: ''
+      wait-gateways:
+        description: Wait for every Gateway in the namespace to be Programmed.
+        type: boolean
+        default: false
+      wait-certificates:
+        description: Wait for every cert-manager Certificate in the namespace to be Ready.
+        type: boolean
+        default: false
+      app-url:
+        description: Public base URL; exported as APP_URL and shown on the environment.
+        type: string
+        default: ''
+      ready-path:
+        description: Path polled on app-url until it responds and (optionally) contains ready-text.
+        type: string
+        default: ''
+      ready-text:
+        type: string
+        default: ''
+      smoke-command:
+        description: Optional shell command run from the repository root after deployment; APP_URL is exported.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ inputs.app-url }}
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: aks-deploy-${{ inputs.environment }}-${{ inputs.namespace }}
+      cancel-in-progress: false
+    env:
+      NAMESPACE: ${{ inputs.namespace }}
+      APP_URL: ${{ inputs.app-url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - name: Get cluster credentials
+        run: |
+          sudo az aks install-cli --only-show-errors >/dev/null
+          az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$CLUSTER" --overwrite-existing --only-show-errors
+          kubelogin convert-kubeconfig -l azurecli
+          kubectl config set-context --current --namespace "$NAMESPACE"
+        env:
+          RESOURCE_GROUP: ${{ inputs.resource-group }}
+          CLUSTER: ${{ inputs.cluster-name }}
+
+      - name: Render manifests
+        run: |
+          names=()
+          while IFS= read -r line; do
+            [ -z "${line// }" ] && continue
+            name="${line%%=*}"
+            [[ "$name" =~ ^[A-Z_][A-Z0-9_]*$ ]] || { echo "::error::Invalid manifest variable name: $name"; exit 1; }
+            export "$name=${line#*=}"
+            names+=("\${$name}")
+          done <<< "$MANIFEST_VARS"
+          mkdir -p "$RUNNER_TEMP/rendered"
+          for file in $MANIFESTS; do
+            envsubst "${names[*]}" < "$file" > "$RUNNER_TEMP/rendered/$(basename "$file")"
+          done
+          if grep -n '\${' "$RUNNER_TEMP"/rendered/*; then
+            echo "::error::Unsubstituted variables remain in rendered manifests"; exit 1
+          fi
+        env:
+          MANIFESTS: ${{ inputs.manifests }}
+          MANIFEST_VARS: ${{ inputs.manifest-vars }}
+
+      - name: Apply
+        run: |
+          kubectl apply --server-side --dry-run=server -f "$RUNNER_TEMP/rendered"
+          kubectl apply --server-side -f "$RUNNER_TEMP/rendered"
+
+      - name: Wait for rollout
+        if: inputs.rollout != ''
+        run: |
+          for workload in $ROLLOUT; do
+            kubectl rollout status "$workload" --timeout=5m
+          done
+        env:
+          ROLLOUT: ${{ inputs.rollout }}
+
+      - name: Wait for gateways
+        if: inputs.wait-gateways
+        run: kubectl wait gateway --all --for=condition=Programmed --timeout=10m
+
+      - name: Wait for certificates
+        if: inputs.wait-certificates
+        run: |
+          kubectl wait certificate --all --for=condition=Ready --timeout=10m || {
+            kubectl describe certificate,certificaterequest,order,challenge; exit 1; }
+
+      - name: Wait for endpoint
+        if: inputs.ready-path != ''
+        run: |
+          for _ in $(seq 1 60); do
+            body=$(curl -fsS --max-time 10 "$APP_URL$READY_PATH" || true)
+            if [ -n "$body" ] && [[ "$body" == *"$READY_TEXT"* ]]; then echo "$body"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::$APP_URL$READY_PATH did not return the expected content"; exit 1
+        env:
+          READY_PATH: ${{ inputs.ready-path }}
+          READY_TEXT: ${{ inputs.ready-text }}
+
+      - name: Smoke test
+        if: inputs.smoke-command != ''
+        run: ${{ inputs.smoke-command }}
+
+      - name: Diagnostics
+        if: failure()
+        run: kubectl get all,gateway,httproute,certificate -o wide && kubectl get events --sort-by=.lastTimestamp | tail -40

@@ -1,3 +1,6 @@
 *
-!dist/
-!dist/**
+!global.json
+!src/
+!src/**
+**/bin/
+**/obj/
