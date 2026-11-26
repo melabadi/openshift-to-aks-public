@@ -1,0 +1,172 @@
+# Reusable: test a .NET solution, build a container image, smoke-test it hardened (read-only FS, arbitrary UID),
+# and optionally publish it to Azure Container Registry with GitHub OIDC (no stored credentials).
+name: dotnet-container-build
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Repository name inside the registry, e.g. "claims".
+        type: string
+        required: true
+      solution:
+        description: Solution or project passed to "dotnet test". Empty skips tests.
+        type: string
+        default: ''
+      global-json-file:
+        type: string
+        default: global.json
+      context:
+        type: string
+        default: .
+      dockerfile:
+        type: string
+        default: Dockerfile
+      container-port:
+        type: number
+        default: 8080
+      health-path:
+        type: string
+        default: /healthz
+      smoke-command:
+        description: Optional shell command run against the local container; APP_URL is exported.
+        type: string
+        default: ''
+      publish:
+        description: Push the image to ACR (requires environment and Azure inputs).
+        type: boolean
+        default: false
+      environment:
+        description: GitHub environment that holds the federated credential used to push.
+        type: string
+        default: ''
+      registry-name:
+        description: ACR name or login server. Pushing needs only the AcrPush data-plane role.
+        type: string
+        default: ''
+      azure-client-id:
+        type: string
+        default: ''
+      azure-tenant-id:
+        type: string
+        default: ''
+      azure-subscription-id:
+        type: string
+        default: ''
+    outputs:
+      release:
+        description: Release identifier baked into the image (RELEASE build arg).
+        value: ${{ jobs.build.outputs.release }}
+      image:
+        description: Pushed image reference pinned by digest (empty when not published).
+        value: ${{ jobs.publish.outputs.image }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      release: ${{ steps.meta.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: meta
+        run: echo "release=${GITHUB_SHA::12}-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - if: inputs.solution != ''
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: ${{ inputs.global-json-file }}
+
+      - if: inputs.solution != ''
+        run: dotnet test "$SOLUTION" --configuration Release
+        env:
+          SOLUTION: ${{ inputs.solution }}
+
+      - name: Build image
+        run: docker build --pull --build-arg "RELEASE=$RELEASE" -t "$IMAGE_NAME:candidate" -f "$DOCKERFILE" "$CONTEXT"
+        env:
+          RELEASE: ${{ steps.meta.outputs.release }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          CONTEXT: ${{ inputs.context }}
+
+      - name: Run hardened container
+        run: |
+          docker run -d --name candidate --read-only --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges --user 10001:0 -p "127.0.0.1:8080:$PORT" "$IMAGE_NAME:candidate"
+          for _ in $(seq 1 30); do
+            curl -fsS "http://127.0.0.1:8080$HEALTH_PATH" && exit 0
+            sleep 1
+          done
+          docker logs candidate
+          exit 1
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+          PORT: ${{ inputs.container-port }}
+          HEALTH_PATH: ${{ inputs.health-path }}
+
+      - if: inputs.smoke-command != ''
+        name: Smoke test container
+        run: ${{ inputs.smoke-command }}
+        env:
+          APP_URL: http://127.0.0.1:8080
+
+      - if: always()
+        run: docker logs candidate || true
+
+      - if: inputs.publish
+        run: docker save "$IMAGE_NAME:candidate" | gzip > image.tar.gz
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+
+      - if: inputs.publish
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image
+          path: image.tar.gz
+          retention-days: 1
+
+  publish:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure-client-id }}
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+
+      - id: push
+        name: Push to ACR
+        run: |
+          gunzip -c image.tar.gz | docker load
+          server="$REGISTRY"; [[ "$server" == *.* ]] || server="$REGISTRY.azurecr.io"
+          az acr login --name "$server"
+          target="$server/$IMAGE_NAME:$RELEASE"
+          docker tag "$IMAGE_NAME:candidate" "$target"
+          docker push "$target"
+          image=$(docker inspect --format '{{index .RepoDigests 0}}' "$target")
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Published \`$image\`" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          REGISTRY: ${{ inputs.registry-name }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          RELEASE: ${{ needs.build.outputs.release }}
